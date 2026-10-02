@@ -1,194 +1,170 @@
-# NHK ONE / NHKプラス 配信・DRM調査
+# nhk-one-downloader
 
-NHK ONE（旧 NHKプラス）の配信メタデータ、Androidアプリの通信経路、HLS暗号化シグナリングを検証した記録です。
+NHK ONE（旧 NHK プラス）の見逃し配信を、**URL と `.wvd` を渡すだけ** で MP4 に保存する CLI。
 
-## 結論
+- 依存パッケージなし（Node 18+ の標準ライブラリのみ）。**pywidevine 不要**——Widevine CDM を Node の `crypto` で実装している
+- **Bearer トークンはブラウザ不要で自動発行**（匿名トークン。F12 でコピーする必要がない）
+- 映像 + 音声 + 字幕（ARIB 制御記号を整理）を 1 つの MP4 に mux
+- 画質 / 副音声の選択、中断後のレジューム、シリーズ一括取得
 
-| 項目 | 確認結果 |
+## 必要なもの
+
+| もの | 補足 |
 | --- | --- |
-| GeoIP制限 | 日本国外ではアプリが地域制限を表示し、ライブ配信ディスクリプタはHTTP 403。日本経由ではHTTP 200 |
-| Androidライブ配信 | G1・G2・E1・E3の`videoinfo.json`と最終HLS URLを確認 |
-| Android VOD再生 | コンテンツ固有descriptor、CENC/CBCS HLS、暗号化映像・音声・WebVTT字幕の実再生／取得を確認 |
-| 配信形式 | HLS + fragmented MP4（`.m4s`）、AVC/H.264 + AAC |
-| Widevine経路 | `cenc`、`SAMPLE-AES-CTR`、Widevine UUID/PSSHを確認 |
-| FairPlay経路 | `cbcs`、`SAMPLE-AES`、`com.apple.streamingkeydelivery`を確認 |
-| Widevineライセンス先 | `https://licence.hsk.st.nhk/widevine/license` |
-| Androidエミュレーター | Widevine L3、CDM `18.0.0@340720000` |
+| Node.js 18 以上 | 標準ライブラリのみ使用 |
+| ffmpeg | CENC 復号と mux。`--ffmpeg` または `$FFMPEG` でパス指定可 |
+| Widevine L3 の `.wvd` | 端末から取得したもの |
+| 日本国内の回線 | API / CDN が GeoIP 制御。国外からは 403 |
 
-## レポート
-
-- [Androidアプリ静的・動的解析（ライブ配信URL／暗号化）](docs/android-app-analysis.md)
-- [Web/VODに関する先行調査](docs/findings.md)
-- [ライブ計測結果](evidence/android-live-manifest-summary.json)
-- [VOD動的解析結果](evidence/vod-dynamic-analysis.json)
-
-## 再計測
-
-日本国内で正規に利用可能なネットワークから、次を実行します。
+## クイックスタート
 
 ```bash
-python3 scripts/04-live-manifest-probe.py \
-  --output android-live-manifest-summary.json
+git clone https://github.com/nmt3325/nhk-one-downloader
+cd nhk-one-downloader
+
+# .wvd を一度だけ登録（~/.nhk-one/config.json に保存）
+node nhk-dl.js config set-wvd ./device.wvd
+
+# あとは URL を渡すだけ
+node nhk-dl.js 'https://www.web.nhk/tv/pl/series-tep-XXXX/ep/YYYYYYYYYY'
 ```
 
-## 暗号化されたままの動画ダウンロード
+```
+▸ SONGS 80年代名曲集▽20年の歴史から厳選したパフォーマンス!  (2026-10-01)
+  1920x1080 (6192 kbps) ・ 音声 main (am192) ・ 字幕 ja
+  447/447 セグメント ・ 44:44
+  [1/4] 鍵を取得
+        コンテンツ鍵 3 件 (映像 KID 一致 / 音声 KID 一致)
+  [2/4] 映像
+  [3/4] 音声
+  [4/4] 復号・結合
+✓ 保存しました: ./SONGS 80年代名曲集... (2026-10-01).mp4 (2.1 GB)
+```
 
-VODのメディアプレイリストURLを指定すると、initセグメントと`.m4s`セグメントを復号せずそのまま保存できます。`--concat`で連結した単一fMP4（暗号化されたまま）も出力できます。字幕プレイリスト（WebVTT）も同時に取得・1ファイルへ結合できます。
+`npm link`（または `npm i -g .`）すれば `nhk-dl` / `nhk-token` コマンドとして使える。
+
+## 使い方
 
 ```bash
-# 映像（CENC/v1500）を暗号化されたまま取得し、連結fMP4を出力
-python3 scripts/05-download-encrypted-vod.py \
-  --playlist 'https://archive2.hsk.st.nhk/npd4/.../cenc/v1500/playlist.m3u8' \
-  --output out/cenc-v1500 --concat out/cenc-v1500.mp4
+# エピソード ID だけでもよい
+nhk-dl 35SWR3WU5L
 
-# 字幕（WebVTT）も一緒に取得して1ファイルに結合
-python3 scripts/05-download-encrypted-vod.py \
-  --playlist '<media-playlist-url>' --output out/cenc-v1500 --concat out/cenc-v1500.mp4 \
-  --subtitle-playlist '<subtitle-playlist-url>' --concat-subtitles out/subtitles.vtt
+# .wvd をその場で渡す（位置引数で .wvd を認識する）
+nhk-dl 35SWR3WU5L ./device.wvd
 
-# 試験用に先頭数セグメントのみ（字幕も同じ件数に制限）
-python3 scripts/05-download-encrypted-vod.py \
-  --playlist '<media-playlist-url>' --output out/test --max-segments 2 \
-  --subtitle-playlist '<subtitle-playlist-url>' --concat-subtitles out/test.vtt
+# メタデータと画質一覧を見る
+nhk-dl 35SWR3WU5L --info
+nhk-dl 35SWR3WU5L --list
 
-# マスタープレイリストから全バリアントを一括取得（字幕は自動検出。--no-subtitlesで無効化）
-python3 scripts/05-download-encrypted-vod.py \
-  --master '<master-playlist-url>' --output out/all
+# 720p、副音声、字幕なし、並列 8
+nhk-dl 35SWR3WU5L -q 720 --audio sub --no-subtitles -j 8
+
+# 出力先を指定
+nhk-dl 35SWR3WU5L -d ~/Movies
+nhk-dl 35SWR3WU5L -o ~/Movies/songs.mp4
+
+# シリーズの一覧 → 配信中の全部
+nhk-dl 'https://www.web.nhk/pl/series-tep-7QRYY2G3VN'
+nhk-dl 'https://www.web.nhk/pl/series-tep-7QRYY2G3VN' --all
+
+# 複数まとめて
+nhk-dl 35SWR3WU5L LG67P7LXNN MJ253291K1
+
+# 動作確認（先頭 6 セグメントだけ）
+nhk-dl 35SWR3WU5L --max-segments 6 -q worst
+
+# F12 で拾った URL を直接渡してもよい
+nhk-dl 'https://archive2.hsk.st.nhk/.../videoinfo-xxxx.json'
+nhk-dl 'https://archive2.hsk.st.nhk/.../cenc/manifest_m6000.m3u8'
 ```
 
-字幕URLはマスタープレイリストの`#EXT-X-MEDIA:TYPE=SUBTITLES`の`URI`です。結合後の`.vtt`は先頭に1つの`WEBVTT`ヘッダーを持ち、各セグメントの`X-TIMESTAMP-MAP`を保持します。
+出力名は「シリーズ名 エピソード名 (放送日).mp4」。途中で落とした分は作業ディレクトリに残るので、
+`--work-dir` を固定しておけば同じコマンドの再実行でレジュームする。
 
-出力は`ftyp`/`encv`/`schm=cenc`/`tenc`/`pssh`を含む暗号化fMP4であり、メディアセグメントは`styp`/`moof`/`senc`構造のままです（復号は行いません）。
+## 主なオプション
 
-## WVDファイルを使った復号ダウンロード
+| オプション | 意味 |
+| --- | --- |
+| `--wvd <path>` | `.wvd` を指定。指定がなければ `$NHK_WVD` → `config.json` → カレント → `~/.nhk-one/` を探す |
+| `-o, --output <file>` / `-d, --output-dir <dir>` | 出力先 |
+| `-q, --quality <q>` | `best`（既定）/ `worst` / `1080` / `720` / `3000k` |
+| `--audio main\|sub` | 副音声は `sub` |
+| `--no-subtitles` / `--keep-subtitle-tokens` | 字幕を入れない / ARIB 制御記号を残す |
+| `-j, --concurrency <n>` | セグメント並列数（既定 6） |
+| `--max-segments <n>` | 先頭 n セグメントだけ（動作確認用） |
+| `--info` / `--list` / `-a, --all` | メタデータ / 画質一覧 / シリーズ全件 |
+| `--work-dir <dir>` / `--keep-work` | 作業ディレクトリ（既定 `$TMPDIR/nhk-dl/<ID>-<tier>`） |
+| `--bearer-token <tok>` / `--no-auto-token` | トークンを明示指定 / 自動発行を止める |
+| `--json` / `--quiet` / `--force` | JSON 出力 / 進捗抑制 / 上書き |
 
-Widevine L3 CDMデバイスファイル（`.wvd`）とBearerトークンがあれば、暗号化セグメントをダウンロードして復号し、再生可能なMP4を出力できます。
+環境変数: `NHK_WVD` / `NHK_BEARER_TOKEN` / `FFMPEG` / `NHK_ONE_HOME`（設定ディレクトリ）。
+
+## nhk-token（付随ツール）
+
+通常は `nhk-dl` が自動発行するので使わなくてよい。手動で扱いたいとき用。
 
 ```bash
-pip install pywidevine  # 必須
-
-# 番組ページURLから自動解決してダウンロード＋復号
-python3 scripts/06-decrypt-vod.py \
-  --url 'https://www.web.nhk/tv/pl/series-tep-XXXX/ep/YYYY' \
-  --wvd device.wvd \
-  --bearer-token '<token>' \
-  --output output.mp4
-
-# descriptor URLを直接指定
-python3 scripts/06-decrypt-vod.py \
-  --descriptor-url 'https://archive2.hsk.st.nhk/npd4/.../videoinfo-XXX.json' \
-  --wvd device.wvd \
-  --bearer-token '<token>' \
-  --output output.mp4
-
-# マスタープレイリストから自動選択してダウンロード＋復号
-python3 scripts/06-decrypt-vod.py \
-  --master '<master-playlist-url>' \
-  --wvd device.wvd \
-  --bearer-token '<token>' \
-  --output output.mp4
-
-# 映像・音声プレイリストを個別指定
-python3 scripts/06-decrypt-vod.py \
-  --video-playlist '<video-playlist-url>' \
-  --audio-playlist '<audio-playlist-url>' \
-  --wvd device.wvd \
-  --bearer-token '<token>' \
-  --output output.mp4
-
-# 字幕も一緒に取得してMP4へ mux
-python3 scripts/06-decrypt-vod.py \
-  --master '<master-playlist-url>' \
-  --wvd device.wvd \
-  --bearer-token '<token>' \
-  --output output.mp4 \
-  --concat-subtitles subtitles.vtt
-
-# 番組中盤のセグメントを取得（先頭200セグメントをスキップ）
-python3 scripts/06-decrypt-vod.py \
-  --master '<master-playlist-url>' \
-  --wvd device.wvd \
-  --bearer-token '<token>' \
-  --output test.mp4 \
-  --skip-segments 200 --max-segments 3
-
-# テスト用に先頭3セグメントのみ
-python3 scripts/06-decrypt-vod.py \
-  --master '<master-playlist-url>' \
-  --wvd device.wvd \
-  --bearer-token '<token>' \
-  --output test.mp4 \
-  --max-segments 3
+nhk-token              # 匿名トークンを発行して ~/.nhk-one/token.json に保存
+nhk-token show         # 有効期限・scope・profileType を表示
+nhk-token show -p      # トークン文字列をそのまま出力
+nhk-token paste        # 自分のアカウントの z_at / Bearer を登録（stdin も可）
+nhk-token clear        # 保存済みトークンを削除
 ```
 
-### bearer-tokenの取得方法
+エリアは既定で東京。変える場合は `--area 130 --pref 13 --jisx0402 13101 --postal 1000001`。
 
-`--bearer-token`にはNHK ONEアプリが発行するアクセストークン（JWT）を指定します。匿名アカウントでも発行されます。有効期限は約8時間です。
+## 仕組み
 
-**方法: Fridaで実行中のアプリから取得**
+1. **匿名トークン**: `consentToUse` クッキーを自分でセットして
+   `GET https://www.web.nhk/tix/build_authorize?idp=r-alaz&profileType=anonymous&...` をリダイレクト追跡
+   → `z_at`（JWT / `scope: get:news get:tv` / 有効 8 時間）がクッキージャーに入る
+2. **メタデータ**: `https://api.web.nhk/r8/t/tvepisode/te/<ID>.json` → `video[].detailedVideoDescriptor`
+3. **descriptor**: `manifests[]` の `drm_type: cenc` から最高ビットレートの master m3u8
+4. **master m3u8**: RESOLUTION 属性がないので、init セグメントの `encv`（元形式は `frma`）から解像度を読む。
+   音声はグループ `l5`(192k) / `l2`(64k) の main / sub、字幕は `subtl/playlist.m3u8`
+5. **ライセンス**: init の `pssh` から challenge を組み立てて
+   `https://licence.hsk.st.nhk/widevine/license` に POST → コンテンツ鍵
+6. **復号**: `tenc` の default_KID に一致する鍵を ffmpeg の `-decryption_key` に渡して結合
 
-```bash
-# アプリを起動した状態で、Fridaでトークンを抽出
-frida -U -p <nhk_app_pid> --runtime=v8 -l scripts/07-extract-token.js
+Authorization ヘッダは `api.web.nhk` と `licence.hsk.st.nhk` にのみ付ける（CDN に付けると 400）。
+詳細は [docs/anonymous-token.md](docs/anonymous-token.md)。
 
-# またはアプリをspawnする場合
-frida -U -f nhk.app.tep --runtime=v8 -l scripts/07-extract-token.js
+## ファイル構成
+
+```
+nhk-dl.js        メイン CLI
+nhk-token.js     トークン管理
+lib/
+  widevine.js    Widevine CDM（protobuf / AES-CMAC / RSA-PSS / 鍵導出）
+  auth.js        匿名トークン発行と保存
+  license.js     ライセンスサーバー通信
+  nhk.js         入力判別 / API / descriptor / 出力名
+  hls.js         m3u8 解析、tenc / 解像度のボックス解析
+  download.js    並列 DL、レジューム、ffmpeg 復号・mux
+  subtitles.js   WebVTT 結合と ARIB トークン整理
+  http.js        クッキージャー付き HTTP、リトライ、並列制御
+  config.js      ~/.nhk-one の設定と .wvd 解決
+  args.js        引数パーサ
 ```
 
-出力される `Bearer eyJ...` 形式の文字列をそのまま `--bearer-token` に渡してください（`Bearer ` プレフィックスも含めて指定可能です）。
+## つまずいたとき
 
-**方法: ブラウザのDevToolsコンソールから取得（Web版・最も簡単）**
+| メッセージ | 対処 |
+| --- | --- |
+| `.wvd ファイルが見つかりません` | `nhk-dl config set-wvd <path>` か `--wvd` |
+| `ライセンスサーバーが HTTP 401 / 403` | `nhk-token auto` で再発行。国外回線でも起きる |
+| `このエピソードには再生可能な映像がありません` | 配信期限切れ（通常放送から約 1 週間） |
+| `匿名トークンの発行に失敗` | 日本国内からアクセスしているか確認。`nhk-token paste` で手動登録も可 |
+| `ffmpeg が見つかりません` | `brew install ffmpeg` / `apt install ffmpeg` / `winget install Gyan.FFmpeg` |
+| セグメントが 403 | CDN に Authorization を付けると落とせない。`-j` を下げて再試行 |
 
-1. ChromeでNHK ONEのエピソードページを開き、再生ボタンを押す
-2. F12 → Console タブを開き、`scripts/09-get-token-console.js` の内容を全てペーストして Enter
-   （初回は「allow pasting」と入力してペーストを許可）
-3. `Bearer eyJ...` がクリップボードにコピーされ、有効期限も表示される
+## 調査記録
 
-トークンはHttpOnlyでない `z_at` Cookieに格納されているため、`document.cookie`から直接読めます。手動で取る場合: Network タブで `api.web.nhk` へのリクエストの Request Headers にある `Authorization: Bearer eyJ...` をコピー、または Application → Cookies → `z_at` の値を使用。
+このリポジトリはもともと NHK ONE の配信・DRM の調査記録。当時の資料はそのまま残してある。
 
-### 入力ソースの解決フロー
-
-1. **`--url`**: 番組ページURLからエピソードIDを抽出し、`api.web.nhk/r8/t/tvepisode/te/{id}.json`でエピソード情報を取得。`video[0].detailedVideoDescriptor`からdescriptor URLを取得する。このフィールドは認証が必要な場合がある
-2. **`--descriptor-url`**: video descriptor JSONを直接指定。`manifests[]`から最適なCENC manifestを自動選択
-3. **`--master`**: HLSマスタープレイリストを直接指定。最高ビットレートの映像・主音声・字幕を自動検出
-4. **`--video-playlist` + `--audio-playlist`**: メディアプレイリストを個別指定
-
-フロー: initセグメントからWidevine PSSHを抽出 → pywidevineでライセンスチャレンジを生成 → NHKのライセンスサーバーへPOST → 鍵を取得 → FFmpegの`-decryption_key`で復号・映像音声をマージ。`--master`指定時は映像・音声・字幕プレイリストを自動検出します。
-
-字幕はARIB STD-B24由来の制御トークン（`[CS]`, `[COL_4]`, `[APS_x_y]`等）を自動で除去・改行変換し、0秒起点にリベースしてmuxします（VLC等でそのまま表示可能）。生の制御トークンを保持したい場合は`--keep-subtitle-tokens`を指定してください。
-
-デフォルトではプレーンテキスト字幕（制御トークン除去・0秒起点リベース済み）がMP4に埋め込まれます。位置・色・サイズを保持したASS字幕（`<output名>.ass`）が必要な場合は`--ass`を指定してください（実TS抜きツールのCaption2Assやarib-ts2assと同じ手法。VLCは同名の`.ass`を自動で読み込みます）。
-
-## Web版スクリプト（Playwright不要の純CLI）
-
-`scripts/08-web-decrypt-vod.js`は`06-decrypt-vod.py`のWeb版で、AndroidエミュレーターやFridaなしで動作します。Node.jsの標準ライブラリのみ使用（npm install不要）。BearerトークンはブラウザのF12から手動取得します。
-
-```bash
-# エピソードURLから自動解決してダウンロード＋復号
-node scripts/08-web-decrypt-vod.js \
-  --url 'https://www.web.nhk/tv/pl/series-tep-XXX/ep/YYY' \
-  --bearer-token 'eyJ...' \
-  --wvd device.wvd --output output.mp4
-
-# F12でコピーしたマスタープレイリストURLを直接指定
-node scripts/08-web-decrypt-vod.js \
-  --master 'https://archive2.hsk.st.nhk/.../cenc/manifest_m6000.m3u8' \
-  --bearer-token 'eyJ...' --wvd device.wvd --output output.mp4
-
-# ダウンロードのみ（復号しない場合はトークン不要）
-node scripts/08-web-decrypt-vod.js \
-  --master 'https://archive2.hsk.st.nhk/.../cenc/manifest_m6000.m3u8' \
-  --max-segments 3
-```
-
-認証まわりの仕様（2026-08-26時点の実測）:
-
-- `api.web.nhk`: 有効なBearerトークン付きでのみ`detailedVideoDescriptor`フィールドを返す（認証なしでも200だが同フィールドなし）
-- CDN（`archive2.hsk.st.nhk`）: セグメント・マニフェストは認証なしで配信される。無効なトークンを送ると400で拒否されるため、CDNリクエストにはAuthorizationを付けない
-- ライセンスサーバー（`licence.hsk.st.nhk`）: Bearerトークン必須
-
-
-## 注意
-
-- URLやAPI構造は検証時点（2026-08-26）のものです。
-- 配信の利用はサービスの利用条件、権利、地域制限に従ってください。
+- [docs/anonymous-token.md](docs/anonymous-token.md) — 匿名トークン発行と純 Node 版 CDM の実装メモ
+- [docs/research-notes.md](docs/research-notes.md) — 旧 README（Android アプリ解析、Frida 手順、旧スクリプトの使い方）
+- [docs/findings.md](docs/findings.md) / [docs/android-app-analysis.md](docs/android-app-analysis.md)
+- `scripts/` — 調査当時のスクリプト群。`08-web-decrypt-vod.js` は `nhk-dl` への互換ラッパ
+- `evidence/` — 実測した API レスポンス
+- `chrome-extension/` — ブラウザ内 CDM の実験（WebCrypto 版。未修正のパッディング問題あり）

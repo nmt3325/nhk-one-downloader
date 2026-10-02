@@ -1,2 +1,13 @@
 __pycache__/
 *.py[cod]
+node_modules/
+
+# Widevine デパイスファイルとトークンは絶対にコミットしない
+*.wvd
+token.json
+
+# 出力と作業ディレクトリ
+*.mp4
+*.m4s
+*.vtt
+.nhk-dl-work/

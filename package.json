@@ -1,0 +1,23 @@
+{
+  "name": "nhk-one-downloader",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NHK ONE の見逃し配信をダウンロードする CLI（Node 標準ライブラリのみ / 依存なし）",
+  "bin": {
+    "nhk-dl": "./nhk-dl.js",
+    "nhk-token": "./nhk-token.js"
+  },
+  "main": "lib/nhk.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "nhk-dl.js",
+    "nhk-token.js",
+    "lib",
+    "README.md"
+  ],
+  "scripts": {
+    "help": "node nhk-dl.js --help"
+  }
+}
